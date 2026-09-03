@@ -30,7 +30,17 @@ import {
   type TeamSplits,
 } from "@/lib/api";
 
+type TabId = "overview" | "lineups" | "shots" | "roster";
+
+const TABS: { id: TabId; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "lineups", label: "Lineups & On/Off" },
+  { id: "shots", label: "Shot Chart" },
+  { id: "roster", label: "Roster" },
+];
+
 export default function TeamHubPage() {
+  const [tab, setTab] = useState<TabId>("overview");
   const [competition, setCompetition] = useState<CompetitionFilter>("ALL");
   const [overview, setOverview] = useState<TeamOverview | null>(null);
   const [splits, setSplits] = useState<TeamSplits | null>(null);
@@ -128,26 +138,49 @@ export default function TeamHubPage() {
             <div className="flex flex-col gap-6">
               <KpiStrip overview={overview} />
 
-              <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-                <div className="lg:col-span-2">
-                  <FourFactorsCard overview={overview} />
+              <div className="flex gap-1 rounded-lg border border-border bg-card p-1 self-start">
+                {TABS.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => setTab(t.id)}
+                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                      tab === t.id ? "bg-accent text-foreground" : "text-muted hover:text-foreground"
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+
+              {tab === "overview" && (
+                <div className="flex flex-col gap-6">
+                  <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+                    <div className="lg:col-span-2">
+                      <FourFactorsCard overview={overview} />
+                    </div>
+                    <GamesList games={games} />
+                  </div>
+                  {splits && <SplitMatrix splits={splits} />}
                 </div>
-                <GamesList games={games} />
-              </div>
+              )}
 
-              {splits && <SplitMatrix splits={splits} />}
+              {tab === "lineups" && (
+                <div className="flex flex-col gap-6">
+                  <LineupTable teamId={HAPOEL_JERUSALEM_TEAM_ID} />
+                  <OnOffTable rows={onOff} />
+                </div>
+              )}
 
-              <LineupTable teamId={HAPOEL_JERUSALEM_TEAM_ID} />
+              {tab === "shots" && shots && (
+                <ShotChart zones={shots.zones} leagueZones={shots.league_avg_zones} />
+              )}
 
-              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                <OnOffTable rows={onOff} />
-                {shots && <ShotChart zones={shots.zones} leagueZones={shots.league_avg_zones} />}
-              </div>
-
-              <div>
-                <p className="mb-3 text-sm font-semibold text-foreground">Player Performance Hub</p>
-                <RosterTable roster={roster} />
-              </div>
+              {tab === "roster" && (
+                <div>
+                  <p className="mb-3 text-sm font-semibold text-foreground">Player Performance Hub</p>
+                  <RosterTable roster={roster} />
+                </div>
+              )}
             </div>
           )
         )}
