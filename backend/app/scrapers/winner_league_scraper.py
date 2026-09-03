@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Game, PlayByPlayEvent, PlayerGameStats, ShotEvent
 from app.scrapers.common import (
+    discard_pbp_if_score_mismatch,
     find_or_create_competition,
     find_or_create_player,
     find_or_create_team,
@@ -187,7 +188,9 @@ class WinnerLeagueScraper:
         segev_id = self._extract_segev_game_id(page_html)
         if segev_id:
             try:
-                self._sync_play_by_play(db, game, home_team.id, away_team.id, segev_id)
+                home_starter_jerseys = {r["jersey"] for r in home_rows if r["starter"] == "*"}
+                away_starter_jerseys = {r["jersey"] for r in away_rows if r["starter"] == "*"}
+                self._sync_play_by_play(db, game, home_team.id, away_team.id, segev_id, home_starter_jerseys, away_starter_jerseys)
                 game.raw_pbp_available = True
             except (httpx.HTTPError, KeyError, ValueError):
                 pass  # box score already saved; PBP is best-effort
@@ -286,7 +289,10 @@ class WinnerLeagueScraper:
         match = re.search(r"segevstats\.com/realtimestat_heb/index\.php\?game_id=(\d+)", page_html)
         return match.group(1) if match else None
 
-    def _sync_play_by_play(self, db: Session, game: Game, home_team_id: str, away_team_id: str, segev_id: str) -> None:
+    def _sync_play_by_play(
+        self, db: Session, game: Game, home_team_id: str, away_team_id: str, segev_id: str,
+        home_starter_jerseys: Optional[set] = None, away_starter_jerseys: Optional[set] = None,
+    ) -> None:
         resp = self.client.get(f"{SEGEV_BASE_URL}/get_team_action.php", params={"game_id": segev_id})
         resp.raise_for_status()
         result = resp.json()["result"]
@@ -297,6 +303,12 @@ class WinnerLeagueScraper:
         team_id_map = {segev_home_id: home_team_id, segev_away_id: away_team_id}
 
         player_id_map: dict[int, str] = {}
+        # Not every game's action log carries an explicit "IN" event for the
+        # five players who started (some do, most don't) — seed the initial
+        # lineup from the box score's starter flag, matched by jersey number,
+        # rather than relying on that.
+        starting_lineup: dict[str, set] = {home_team_id: set(), away_team_id: set()}
+        starter_jerseys_by_team = {home_team_id: home_starter_jerseys or set(), away_team_id: away_starter_jerseys or set()}
         for side, our_team_id in ((game_info["homeTeam"], home_team_id), (game_info["awayTeam"], away_team_id)):
             for p in side["players"]:
                 name = f"{p['firstName'].title()} {p['lastName'].title()}"
@@ -304,8 +316,10 @@ class WinnerLeagueScraper:
                     db, our_team_id, f"WL_{p['id']}", name, jersey=p.get("jerseyNumber")
                 )
                 player_id_map[int(p["id"])] = player.id
+                if p.get("jerseyNumber") in starter_jerseys_by_team[our_team_id]:
+                    starting_lineup[our_team_id].add(player.id)
 
-        lineup: dict[str, set] = {home_team_id: set(), away_team_id: set()}
+        lineup: dict[str, set] = {home_team_id: set(starting_lineup[home_team_id]), away_team_id: set(starting_lineup[away_team_id])}
         running_score = {home_team_id: 0, away_team_id: 0}
         last_made_shot: dict[str, ShotEvent] = {}
         last_made_shot_pbp: dict[str, PlayByPlayEvent] = {}
@@ -330,6 +344,8 @@ class WinnerLeagueScraper:
 
             if atype == "shot" and params.get("made") == "made":
                 running_score[team_id] += params.get("points", 0)
+            elif atype == "freeThrow" and params.get("made") == "made":
+                running_score[team_id] += 1
 
             # segevstats logs an assist as its own event immediately after the
             # made shot it set up; attach it to that shot rather than storing
@@ -379,6 +395,18 @@ class WinnerLeagueScraper:
                     if shot_event.is_made:
                         last_made_shot[team_id] = shot_event
                         last_made_shot_pbp[team_id] = pbp_event
+
+        db.flush()
+        discarded = discard_pbp_if_score_mismatch(
+            db, game.id, running_score[home_team_id], running_score[away_team_id], game.home_score, game.away_score
+        )
+        if discarded:
+            raise ValueError(
+                f"segevstats PBP for game {game.id} reconstructs to "
+                f"{running_score[home_team_id]}-{running_score[away_team_id]}, "
+                f"doesn't match box score {game.home_score}-{game.away_score} "
+                "(a player is likely missing from segevstats' own roster for this game)"
+            )
 
 
 _EVENT_TYPE_MAP = {

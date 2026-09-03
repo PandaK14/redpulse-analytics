@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import app.models  # noqa: F401 register model metadata before create_all
+from app.api.router_player import router as player_router
 from app.api.router_sync import router as sync_router
 from app.api.router_team import router as team_router
 from app.core.database import Base, engine
@@ -27,6 +28,7 @@ app.add_middleware(
 
 app.include_router(sync_router, prefix="/api/sync", tags=["sync"])
 app.include_router(team_router, prefix="/api/teams", tags=["teams"])
+app.include_router(player_router, prefix="/api/players", tags=["players"])
 
 
 @app.get("/health")

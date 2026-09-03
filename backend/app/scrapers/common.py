@@ -11,9 +11,34 @@ import re
 import unicodedata
 from typing import Optional
 
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from app.models import Competition, Player, Team
+from app.models import Competition, PlayByPlayEvent, Player, ShotEvent, Team
+
+
+def discard_pbp_if_score_mismatch(
+    db: Session, game_id: str,
+    computed_home: float, computed_away: float,
+    actual_home: int, actual_away: int,
+    tolerance: int = 2,
+) -> bool:
+    """Some source games are missing one or more players from the live
+    tracking feed entirely (a genuine third-party data gap, not a parsing
+    bug — their stats never appear anywhere in the action log). That leaves
+    play-by-play/shot data self-consistent in shape but silently short on
+    points, which would corrupt lineup/on-off analytics. Cross-checking the
+    reconstructed running score against the box-score-confirmed final score
+    catches it: on mismatch, discard the PBP/shot rows just added for this
+    game rather than keep a plausible-looking but wrong dataset.
+
+    Returns True if discarded (caller should treat PBP as unavailable).
+    """
+    if abs(computed_home - actual_home) <= tolerance and abs(computed_away - actual_away) <= tolerance:
+        return False
+    db.execute(delete(PlayByPlayEvent).where(PlayByPlayEvent.game_id == game_id))
+    db.execute(delete(ShotEvent).where(ShotEvent.game_id == game_id))
+    return True
 
 
 def find_or_create_competition(db: Session, competition_id: str, name: str, season: str) -> Competition:

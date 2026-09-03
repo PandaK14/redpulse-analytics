@@ -19,8 +19,13 @@ import httpx
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.models import Game, PlayByPlayEvent, PlayerGameStats, ShotEvent
-from app.scrapers.common import find_or_create_competition, find_or_create_player, find_or_create_team
+from app.models import Game, Player, PlayByPlayEvent, PlayerGameStats, ShotEvent
+from app.scrapers.common import (
+    discard_pbp_if_score_mismatch,
+    find_or_create_competition,
+    find_or_create_player,
+    find_or_create_team,
+)
 
 V2_BASE_URL = "https://api-live.euroleague.net/v2/competitions/U/seasons"
 LIVE_BASE_URL = "https://live.euroleague.net/api"
@@ -91,6 +96,45 @@ class EuroCupScraper:
     def _team_id_for(self, code: str) -> str:
         return "HAPOEL_JLM" if code == HAPOEL_JERUSALEM_CLUB_CODE else code
 
+    def _ensure_pbp_player(self, db: Session, team_id: str, player_id: str, raw_name: Optional[str]) -> str:
+        """The box score's player list is expected to cover everyone, but the
+        two feeds don't always agree — a player referenced in play-by-play
+        who isn't already known would otherwise become a nameless foreign
+        key. PLAYER is "LAST, FIRST"; fall back to the bare id if absent.
+
+        Returns the id to actually use as the FK on this event: normally
+        player_id itself, but find_or_create_player's Hapoel Jerusalem
+        dedup can resolve to a *different* existing row (matched by name or
+        jersey) — callers must use the returned id, not the raw one, or
+        events end up pointing at a player row that was never created.
+        """
+        if db.get(Player, player_id) is not None:
+            return player_id
+        if raw_name:
+            last, _, first = raw_name.partition(", ")
+            name = f"{first.title()} {last.title()}".strip()
+        else:
+            name = player_id
+        return find_or_create_player(db, team_id, player_id, name).id
+
+    def _resolve_starting_five(self, db: Session, box_score: Optional[dict], side: str, team_id: str) -> set:
+        """Same resolution concern as _ensure_pbp_player: a starter's raw
+        "EL_{code}" id may have been merged into a different existing row
+        (e.g. a Hapoel Jerusalem player already created from a Winner League
+        game) — must seed the lineup with the resolved id, not the raw one."""
+        if not box_score:
+            return set()
+        resolved = set()
+        for entry in box_score[side]["players"]:
+            if not entry["stats"].get("startFive"):
+                continue
+            info = entry["player"]["person"]
+            raw_id = f"EL_{info['code']}"
+            last, _, first = info["name"].partition(", ")
+            name = f"{first.title()} {last.title()}".strip()
+            resolved.add(find_or_create_player(db, team_id, raw_id, name).id)
+        return resolved
+
     def _sync_one_game(self, db: Session, g: dict, season_code: str, game_id: str) -> None:
         home_team_id = self._team_id_for(g["home_code"])
         away_team_id = self._team_id_for(g["away_code"])
@@ -119,7 +163,9 @@ class EuroCupScraper:
             self._persist_box_score(db, game, away_team.id, box_score["road"]["players"])
 
         try:
-            self._sync_play_by_play(db, game, home_team.id, away_team.id, g["home_code"], g["away_code"], season_code, g["gameCode"])
+            self._sync_play_by_play(
+                db, game, home_team.id, away_team.id, g["home_code"], g["away_code"], season_code, g["gameCode"], box_score
+            )
             game.raw_pbp_available = True
         except (httpx.HTTPError, KeyError, ValueError, IndexError):
             pass  # box score already saved; PBP is best-effort
@@ -175,6 +221,7 @@ class EuroCupScraper:
     def _sync_play_by_play(
         self, db: Session, game: Game, home_team_id: str, away_team_id: str,
         home_code: str, away_code: str, season_code: str, game_code: int,
+        box_score: Optional[dict] = None,
     ) -> None:
         pbp_resp = self._get(f"{LIVE_BASE_URL}/PlayByPlay", params={"gamecode": game_code, "seasoncode": season_code})
         pbp_resp.raise_for_status()
@@ -188,11 +235,23 @@ class EuroCupScraper:
             shots_by_key.setdefault(key, []).append(row)
 
         code_to_team_id = {home_code.strip(): home_team_id, away_code.strip(): away_team_id}
-        lineup: dict[str, set] = {home_team_id: set(), away_team_id: set()}
+        # The feed's IN/OUT events only ever model substitutions — the five
+        # players who start the game are never explicitly announced, so the
+        # tracked lineup must be seeded from the box score's startFive flag
+        # or it stays wrong (missing players) until enough subs happen.
+        lineup: dict[str, set] = {
+            home_team_id: self._resolve_starting_five(db, box_score, "local", home_team_id),
+            away_team_id: self._resolve_starting_five(db, box_score, "road", away_team_id),
+        }
         last_made_shot: dict[str, ShotEvent] = {}
         last_made_shot_pbp: dict[str, PlayByPlayEvent] = {}
         pbp_counter = 0
         shot_counter = 0
+        # POINTS_A/POINTS_B are only populated by the feed on the scoring
+        # play itself (null on every other row) — carry the last known value
+        # forward rather than treating a null as a reset to 0.
+        running_home_score = 0
+        running_away_score = 0
 
         quarters = [
             pbp_data.get("FirstQuarter", []), pbp_data.get("SecondQuarter", []),
@@ -206,8 +265,16 @@ class EuroCupScraper:
                 team_id = code_to_team_id.get(team_code)
                 play_type = play["PLAYTYPE"]
 
+                if play.get("POINTS_A") is not None:
+                    running_home_score = play["POINTS_A"]
+                if play.get("POINTS_B") is not None:
+                    running_away_score = play["POINTS_B"]
+
                 if play_type in ("IN", "OUT") and team_id:
-                    player_key = f"EL_{(play.get('PLAYER_ID') or '').strip()}"
+                    player_key = _pbp_player_id(play.get("PLAYER_ID"))
+                    if not player_key:
+                        continue
+                    player_key = self._ensure_pbp_player(db, team_id, player_key, play.get("PLAYER"))
                     if play_type == "IN":
                         lineup[team_id].add(player_key)
                     else:
@@ -217,10 +284,11 @@ class EuroCupScraper:
                 if play_type not in _EVENT_TYPE_MAP or not team_id:
                     continue
 
-                raw_player_id = (play.get("PLAYER_ID") or "").strip()
-                player_id = f"EL_{raw_player_id}" if raw_player_id else None
-                home_score = play.get("POINTS_A") or 0
-                away_score = play.get("POINTS_B") or 0
+                player_id = _pbp_player_id(play.get("PLAYER_ID"))
+                if player_id:
+                    player_id = self._ensure_pbp_player(db, team_id, player_id, play.get("PLAYER"))
+                home_score = running_home_score
+                away_score = running_away_score
 
                 if play_type == "AS" and player_id and team_id in last_made_shot:
                     last_made_shot[team_id].is_assisted = True
@@ -271,6 +339,17 @@ class EuroCupScraper:
                             last_made_shot[team_id] = shot_event
                             last_made_shot_pbp[team_id] = pbp_event
 
+        db.flush()
+        discarded = discard_pbp_if_score_mismatch(
+            db, game.id, running_home_score, running_away_score, game.home_score, game.away_score
+        )
+        if discarded:
+            raise ValueError(
+                f"EuroCup PBP for game {game.id} reconstructs to "
+                f"{running_home_score}-{running_away_score}, doesn't match box score "
+                f"{game.home_score}-{game.away_score} (a player is likely missing from the live feed for this game)"
+            )
+
 
 _EVENT_TYPE_MAP = {
     "2FGM": "SHOT", "2FGA": "SHOT", "3FGM": "SHOT", "3FGA": "SHOT",
@@ -283,6 +362,18 @@ _EVENT_TYPE_MAP = {
     "AS": "ASSIST",
 }
 _SHOT_PLAY_TYPES = {"2FGM", "2FGA", "3FGM", "3FGA"}
+
+
+
+
+def _pbp_player_id(raw: Optional[str]) -> Optional[str]:
+    """The live PlayByPlay/Points feeds prefix player codes with "P"
+    (e.g. "P013906") while the v2 box score endpoint gives the bare code
+    ("013906") — normalize to the box score's scheme so ids agree."""
+    code = (raw or "").strip()
+    if code.upper().startswith("P"):
+        code = code[1:]
+    return f"EL_{code}" if code else None
 
 
 def _parse_iso(value: str) -> datetime:
