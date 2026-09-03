@@ -48,9 +48,13 @@ def team_game_rows(db: Session, team_id: str, competition_id: Optional[str] = No
     rows = []
     for game in query.all():
         opponent_id = game.away_team_id if game.home_team_id == team_id else game.home_team_id
-        team_stats = _sum_stats(db.query(PlayerGameStats).filter_by(game_id=game.id, team_id=team_id).all())
-        opp_stats = _sum_stats(db.query(PlayerGameStats).filter_by(game_id=game.id, team_id=opponent_id).all())
-        rows.append({"game": game, "opponent_id": opponent_id, "team": team_stats, "opponent": opp_stats})
+        team_rows = db.query(PlayerGameStats).filter_by(game_id=game.id, team_id=team_id).all()
+        opp_rows = db.query(PlayerGameStats).filter_by(game_id=game.id, team_id=opponent_id).all()
+        if not team_rows or not opp_rows:
+            continue  # box score not (yet) available for this game — exclude rather than count it as 0-0
+        rows.append(
+            {"game": game, "opponent_id": opponent_id, "team": _sum_stats(team_rows), "opponent": _sum_stats(opp_rows)}
+        )
     return rows
 
 

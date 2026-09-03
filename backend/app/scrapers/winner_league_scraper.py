@@ -21,10 +21,17 @@ from typing import Optional
 
 import httpx
 from bs4 import BeautifulSoup
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models import Game, PlayByPlayEvent, PlayerGameStats, ShotEvent
-from app.scrapers.common import find_or_create_player, find_or_create_team, slug_for_hebrew_team
+from app.scrapers.common import (
+    find_or_create_competition,
+    find_or_create_player,
+    find_or_create_team,
+    slug_for_hebrew_team,
+    stable_hash,
+)
 
 BASE_URL = "https://basket.co.il"
 SEGEV_BASE_URL = "https://stats.segevstats.com/realtimestat_heb"
@@ -33,7 +40,10 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; RedPulseAnalytics/1.0; person
 BOX_SCORE_COLUMNS = [
     "jersey", "name", "starter", "minutes", "points",
     "fg2", "fg2_pct", "fg3", "fg3_pct", "ft", "ft_pct",
-    "oreb", "dreb", "reb", "fouls", "fouls_drawn", "steals",
+    # Site's own header order is "הג" (defense) then "הת" (offense) — i.e.
+    # DREB before OREB, the opposite of what the abbreviations suggest at a
+    # glance. Verified against segevstats' player-level rebound totals.
+    "dreb", "oreb", "reb", "fouls", "fouls_drawn", "steals",
     "turnovers", "assists", "blocks_made", "blocks_against", "valuation", "plus_minus",
 ]
 
@@ -54,6 +64,9 @@ class WinnerLeagueScraper:
         if max_games is not None:
             games = games[:max_games]
 
+        find_or_create_competition(db, "WINNER_LEAGUE", "Winner League", f"{cyear - 1}-{str(cyear)[-2:]}")
+        db.commit()
+
         synced = 0
         for g in games:
             game_id = f"WL_{g['game_zone_id']}"
@@ -63,7 +76,7 @@ class WinnerLeagueScraper:
                 if self._sync_one_game(db, g, cyear, game_id):
                     db.commit()
                     synced += 1
-            except (httpx.HTTPError, KeyError, ValueError, AttributeError):
+            except (httpx.HTTPError, KeyError, ValueError, AttributeError, SQLAlchemyError):
                 db.rollback()
             time.sleep(delay)
         return synced
@@ -134,15 +147,23 @@ class WinnerLeagueScraper:
         return link.get_text(strip=True)
 
     def _sync_one_game(self, db: Session, g: dict, cyear: int, game_id: str) -> bool:
-        box_score = self.fetch_box_score(g["game_zone_id"])
+        resp = self.client.get(f"{BASE_URL}/game-zone.asp", params={"GameId": g["game_zone_id"]})
+        resp.raise_for_status()
+        page_html = resp.text
+
+        box_score = self._parse_box_score(page_html)
         if box_score is None:
             return False
-        home_rows, away_rows = box_score
 
         home_slug, home_en = slug_for_hebrew_team(g["home_name"])
         away_slug, away_en = slug_for_hebrew_team(g["away_name"])
+        if home_slug not in box_score or away_slug not in box_score:
+            return False  # box score tables didn't match either scheduled team; skip rather than mislabel
+
         home_team = find_or_create_team(db, home_slug, home_en, home_en, "WINNER_LEAGUE", home_slug == "HAPOEL_JLM")
         away_team = find_or_create_team(db, away_slug, away_en, away_en, "WINNER_LEAGUE", away_slug == "HAPOEL_JLM")
+        home_rows = box_score[home_slug]
+        away_rows = box_score[away_slug]
 
         game = Game(
             id=game_id,
@@ -152,8 +173,8 @@ class WinnerLeagueScraper:
             game_date=g["game_date"] or datetime(cyear - 1, 10, 1),
             home_team_id=home_team.id,
             away_team_id=away_team.id,
-            home_score=g["home_score"],
-            away_score=g["away_score"],
+            home_score=sum(int(r["points"]) for r in home_rows),
+            away_score=sum(int(r["points"]) for r in away_rows),
             is_synced=True,
             raw_pbp_available=False,
         )
@@ -163,7 +184,7 @@ class WinnerLeagueScraper:
         self._persist_box_score(db, game, home_team.id, home_rows)
         self._persist_box_score(db, game, away_team.id, away_rows)
 
-        segev_id = self.find_segev_game_id(g["game_zone_id"])
+        segev_id = self._extract_segev_game_id(page_html)
         if segev_id:
             try:
                 self._sync_play_by_play(db, game, home_team.id, away_team.id, segev_id)
@@ -173,11 +194,16 @@ class WinnerLeagueScraper:
 
         return True
 
-    def fetch_box_score(self, game_zone_id: str) -> Optional[tuple[list[dict], list[dict]]]:
+    def fetch_box_score(self, game_zone_id: str) -> Optional[dict[str, list[dict]]]:
         resp = self.client.get(f"{BASE_URL}/game-zone.asp", params={"GameId": game_zone_id})
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+        return self._parse_box_score(resp.text)
 
+    def _parse_box_score(self, page_html: str) -> Optional[dict[str, list[dict]]]:
+        """Returns {team_slug: rows}. Tables are matched to a team by the
+        Hebrew name in their own caption row rather than assumed left/right
+        position — the page doesn't reliably put the home team's table first."""
+        soup = BeautifulSoup(page_html, "html.parser")
         tables = [
             t for t in soup.find_all("table")
             if "stats_tbl" in t.get("class", []) and "categories" not in t.get("class", [])
@@ -185,7 +211,15 @@ class WinnerLeagueScraper:
         if len(tables) < 2:
             return None  # box score not published for this game
 
-        return self._parse_team_table(tables[0]), self._parse_team_table(tables[1])
+        by_slug: dict[str, list[dict]] = {}
+        for table in tables[:2]:
+            caption_row = table.find("tr")
+            if not caption_row:
+                continue
+            caption = caption_row.get_text(" ", strip=True)
+            slug, _ = slug_for_hebrew_team(caption)
+            by_slug[slug] = self._parse_team_table(table)
+        return by_slug if len(by_slug) == 2 else None
 
     def _parse_team_table(self, table) -> list[dict]:
         rows = []
@@ -205,10 +239,13 @@ class WinnerLeagueScraper:
         return rows
 
     def _persist_box_score(self, db: Session, game: Game, team_id: str, rows: list[dict]) -> dict[int, str]:
+        # Keyed by name, not jersey number: a merged franchise (e.g. this
+        # season's Beer Sheva/Dimona combine) can have two different players
+        # wearing the same number, so jersey alone isn't a safe identity key.
         jersey_to_player_id: dict[int, str] = {}
         for r in rows:
             player = find_or_create_player(
-                db, team_id, f"WL_{team_id}_{r['jersey']}", r["name"], jersey=r["jersey"]
+                db, team_id, f"WL_{team_id}_{stable_hash(r['name'])}", r["name"], jersey=r["jersey"]
             )
             jersey_to_player_id[r["jersey"]] = player.id
 
@@ -243,7 +280,10 @@ class WinnerLeagueScraper:
     def find_segev_game_id(self, game_zone_id: str) -> Optional[str]:
         resp = self.client.get(f"{BASE_URL}/game-zone.asp", params={"GameId": game_zone_id})
         resp.raise_for_status()
-        match = re.search(r"segevstats\.com/realtimestat_heb/index\.php\?game_id=(\d+)", resp.text)
+        return self._extract_segev_game_id(resp.text)
+
+    def _extract_segev_game_id(self, page_html: str) -> Optional[str]:
+        match = re.search(r"segevstats\.com/realtimestat_heb/index\.php\?game_id=(\d+)", page_html)
         return match.group(1) if match else None
 
     def _sync_play_by_play(self, db: Session, game: Game, home_team_id: str, away_team_id: str, segev_id: str) -> None:

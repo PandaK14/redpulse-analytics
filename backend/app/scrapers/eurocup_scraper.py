@@ -16,10 +16,11 @@ from datetime import datetime
 from typing import Optional
 
 import httpx
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models import Game, PlayByPlayEvent, PlayerGameStats, ShotEvent
-from app.scrapers.common import find_or_create_player, find_or_create_team
+from app.scrapers.common import find_or_create_competition, find_or_create_player, find_or_create_team
 
 V2_BASE_URL = "https://api-live.euroleague.net/v2/competitions/U/seasons"
 LIVE_BASE_URL = "https://live.euroleague.net/api"
@@ -32,11 +33,26 @@ class EuroCupScraper:
     def __init__(self, client: Optional[httpx.Client] = None):
         self.client = client or httpx.Client(headers=HEADERS, timeout=20, follow_redirects=True)
 
+    def _get(self, url: str, params: Optional[dict] = None, max_retries: int = 4) -> httpx.Response:
+        """GET with Cloudflare-rate-limit awareness: api-live.euroleague.net
+        returns 429 with a `Retry-After` header (observed ~20s) under
+        sustained sequential load, e.g. a full-season backfill."""
+        for attempt in range(max_retries + 1):
+            resp = self.client.get(url, params=params)
+            if resp.status_code != 429:
+                return resp
+            wait = int(resp.headers.get("retry-after", 20)) + 1
+            time.sleep(wait)
+        return resp
+
     def sync(self, db: Session, season_code: str = "U2025", max_games: Optional[int] = None, delay: float = 0.4) -> int:
         games = self.fetch_schedule(season_code)
         games = [g for g in games if g["played"]]
         if max_games is not None:
             games = games[:max_games]
+
+        find_or_create_competition(db, "EUROCUP", "EuroCup", _season_label(season_code))
+        db.commit()
 
         synced = 0
         for g in games:
@@ -47,13 +63,13 @@ class EuroCupScraper:
                 self._sync_one_game(db, g, season_code, game_id)
                 db.commit()
                 synced += 1
-            except (httpx.HTTPError, KeyError, ValueError, AttributeError, IndexError):
+            except (httpx.HTTPError, KeyError, ValueError, AttributeError, IndexError, SQLAlchemyError):
                 db.rollback()
             time.sleep(delay)
         return synced
 
     def fetch_schedule(self, season_code: str) -> list[dict]:
-        resp = self.client.get(f"{V2_BASE_URL}/{season_code}/games")
+        resp = self._get(f"{V2_BASE_URL}/{season_code}/games")
         resp.raise_for_status()
         games = resp.json()["data"]
         return [
@@ -109,7 +125,7 @@ class EuroCupScraper:
             pass  # box score already saved; PBP is best-effort
 
     def _fetch_box_score(self, season_code: str, game_code: int) -> Optional[dict]:
-        resp = self.client.get(f"{V2_BASE_URL}/{season_code}/games/{game_code}/stats")
+        resp = self._get(f"{V2_BASE_URL}/{season_code}/games/{game_code}/stats")
         if resp.status_code != 200:
             return None
         return resp.json()
@@ -160,11 +176,11 @@ class EuroCupScraper:
         self, db: Session, game: Game, home_team_id: str, away_team_id: str,
         home_code: str, away_code: str, season_code: str, game_code: int,
     ) -> None:
-        pbp_resp = self.client.get(f"{LIVE_BASE_URL}/PlayByPlay", params={"gamecode": game_code, "seasoncode": season_code})
+        pbp_resp = self._get(f"{LIVE_BASE_URL}/PlayByPlay", params={"gamecode": game_code, "seasoncode": season_code})
         pbp_resp.raise_for_status()
         pbp_data = pbp_resp.json()
 
-        points_resp = self.client.get(f"{LIVE_BASE_URL}/Points", params={"gamecode": game_code, "seasoncode": season_code})
+        points_resp = self._get(f"{LIVE_BASE_URL}/Points", params={"gamecode": game_code, "seasoncode": season_code})
         points_resp.raise_for_status()
         shots_by_key = {}
         for row in points_resp.json().get("Rows", []):
