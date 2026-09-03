@@ -40,7 +40,10 @@ def _new_tally() -> dict:
     return {"fga": 0, "fta": 0, "oreb": 0, "tov": 0, "points": 0}
 
 
-def _reconstruct_game_stints(events: list[PlayByPlayEvent], team_id: str, home_team_id: str, away_team_id: str) -> list[dict]:
+def _reconstruct_game_stints(
+    events: list[PlayByPlayEvent], team_id: str, home_team_id: str, away_team_id: str,
+    valid_player_ids: Optional[set] = None,
+) -> list[dict]:
     is_home = team_id == home_team_id
     opponent_id = away_team_id if is_home else home_team_id
 
@@ -68,7 +71,15 @@ def _reconstruct_game_stints(events: list[PlayByPlayEvent], team_id: str, home_t
         )
 
     for event in events:
-        lineup = tuple(sorted(event.current_lineup_home if is_home else event.current_lineup_away))
+        raw_lineup = event.current_lineup_home if is_home else event.current_lineup_away
+        # Defends against a source data-quality issue (a coach/bench pseudo-id,
+        # or — rarer — a genuine cross-team player-id collision in the source
+        # feed) leaking a non-roster id into the lineup snapshot: any such
+        # entry drops the snapshot below 5 players, which the final filter
+        # below already excludes, rather than silently mislabeling a stint.
+        if valid_player_ids is not None:
+            raw_lineup = [p for p in raw_lineup if p in valid_player_ids]
+        lineup = tuple(sorted(raw_lineup))
         sec = _elapsed_seconds(event.period, event.game_clock)
 
         if current_lineup is None:
@@ -117,6 +128,7 @@ def team_lineup_stints(db: Session, team_id: str) -> list[dict]:
         (Game.home_team_id == team_id) | (Game.away_team_id == team_id),
         Game.raw_pbp_available.is_(True),
     ).all()
+    valid_player_ids = {p.id for p in db.query(Player.id).filter(Player.team_id == team_id).all()}
 
     all_stints = []
     for game in games:
@@ -126,7 +138,7 @@ def team_lineup_stints(db: Session, team_id: str) -> list[dict]:
             .order_by(PlayByPlayEvent.id)
             .all()
         )
-        if not events or not _lineup_tracking_is_reliable(events, team_id, game.home_team_id):
+        if not events or not _lineup_tracking_is_reliable(events, team_id, game.home_team_id, valid_player_ids):
             # A player entirely missing from the source's own roster for this
             # game (a real, if rare, third-party data gap) leaves that side's
             # lineup snapshot stuck at 4 players for as long as they're on
@@ -136,13 +148,19 @@ def team_lineup_stints(db: Session, team_id: str) -> list[dict]:
             # just the untracked player's minutes. Skip the whole game's
             # lineup data instead of serving a badly truncated result.
             continue
-        all_stints.extend(_reconstruct_game_stints(events, team_id, game.home_team_id, game.away_team_id))
+        all_stints.extend(_reconstruct_game_stints(events, team_id, game.home_team_id, game.away_team_id, valid_player_ids))
     return all_stints
 
 
-def _lineup_tracking_is_reliable(events: list[PlayByPlayEvent], team_id: str, home_team_id: str, threshold: float = 0.8) -> bool:
+def _lineup_tracking_is_reliable(
+    events: list[PlayByPlayEvent], team_id: str, home_team_id: str, valid_player_ids: set, threshold: float = 0.8
+) -> bool:
     is_home = team_id == home_team_id
-    complete = sum(1 for e in events if len(e.current_lineup_home if is_home else e.current_lineup_away) == 5)
+    complete = sum(
+        1
+        for e in events
+        if len([p for p in (e.current_lineup_home if is_home else e.current_lineup_away) if p in valid_player_ids]) == 5
+    )
     return complete / len(events) >= threshold
 
 

@@ -77,7 +77,21 @@ def team_overview(db: Session, team_id: str, competition_id: Optional[str] = Non
     }
 
 
+# competition_average_four_factors is expensive (a team_overview() call per
+# team in the competition) and multiple endpoints on the same page load ask
+# for the same competition's average — cache it in-process rather than
+# recompute it several times per request and hold a DB connection each time.
+_league_avg_cache: dict[str, dict] = {}
+
+
+def invalidate_league_average_cache() -> None:
+    _league_avg_cache.clear()
+
+
 def competition_average_four_factors(db: Session, competition_id: str) -> dict:
+    if competition_id in _league_avg_cache:
+        return _league_avg_cache[competition_id]
+
     team_ids = [t.id for t in db.query(Team).filter(Team.competition_id == competition_id).all()]
     factor_sums = {"efg_pct": 0.0, "tov_pct": 0.0, "orb_pct": 0.0, "ftr": 0.0}
     counted = 0
@@ -87,9 +101,9 @@ def competition_average_four_factors(db: Session, competition_id: str) -> dict:
             counted += 1
             for k in factor_sums:
                 factor_sums[k] += overview["four_factors"][k]
-    if not counted:
-        return factor_sums
-    return {k: round(v / counted, 4) for k, v in factor_sums.items()}
+    result = factor_sums if not counted else {k: round(v / counted, 4) for k, v in factor_sums.items()}
+    _league_avg_cache[competition_id] = result
+    return result
 
 
 def team_roster_with_averages(db: Session, team_id: str) -> list[dict]:

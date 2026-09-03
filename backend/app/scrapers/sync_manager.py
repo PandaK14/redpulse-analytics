@@ -9,6 +9,7 @@ from app.mock_data.generator import generate_mock_season
 from app.models import Game
 from app.scrapers.eurocup_scraper import EuroCupScraper
 from app.scrapers.winner_league_scraper import WinnerLeagueScraper
+from app.services.team_overview import invalidate_league_average_cache
 
 # Process-local sync bookkeeping. Good enough for a single dev/API process;
 # a persisted sync_log table would be the natural upgrade once this runs
@@ -29,6 +30,9 @@ def trigger_sync(db: Session) -> dict:
     else:
         games_synced, errors = _sync_live_sources(db, settings)
         source = "live_scrapers"
+
+    if games_synced:
+        invalidate_league_average_cache()
 
     _last_sync_at = datetime.now(timezone.utc)
     _last_sync_status = "success" if not errors else "partial_failure"

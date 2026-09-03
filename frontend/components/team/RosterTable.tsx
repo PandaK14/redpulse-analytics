@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import type { RosterPlayer } from "@/lib/api";
 
@@ -19,6 +20,7 @@ const COLUMNS: { key: SortKey; label: string; format: (v: number) => string }[] 
 ];
 
 export function RosterTable({ roster }: { roster: RosterPlayer[] }) {
+  const router = useRouter();
   const [sortKey, setSortKey] = useState<SortKey>("ppg");
 
   const sorted = useMemo(
@@ -49,7 +51,11 @@ export function RosterTable({ roster }: { roster: RosterPlayer[] }) {
         </thead>
         <tbody>
           {sorted.map((p) => (
-            <tr key={p.player_id} className="border-b border-border/60 last:border-0 hover:bg-white/[0.02]">
+            <tr
+              key={p.player_id}
+              onClick={() => router.push(`/players/${encodeURIComponent(p.player_id)}`)}
+              className="cursor-pointer border-b border-border/60 last:border-0 hover:bg-white/[0.04]"
+            >
               <td className="px-4 py-2.5 font-medium text-foreground">
                 {p.jersey_number != null && (
                   <span className="mr-2 text-muted">#{p.jersey_number}</span>

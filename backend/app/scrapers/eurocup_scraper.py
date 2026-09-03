@@ -358,8 +358,11 @@ _EVENT_TYPE_MAP = {
     "TO": "TURNOVER",
     "CM": "FOUL", "CMU": "FOUL", "CMT": "FOUL", "OF": "FOUL",
     "ST": "STEAL",
-    "B": "BLOCK",
     "AS": "ASSIST",
+    # Deliberately no "B": it's a bench/coach foul (PLAYER_ID "CO_A"/"CO_B",
+    # not a real player), not a block — including it created spurious
+    # "player" rows for the bench. Blocks aren't used by any of the
+    # possession/rating math, so there's no need to map a real block code.
 }
 _SHOT_PLAY_TYPES = {"2FGM", "2FGA", "3FGM", "3FGA"}
 

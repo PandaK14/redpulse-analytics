@@ -6,6 +6,7 @@ reset every year). We instead key our own `teams`/`players` rows on a
 source-independent slug so re-syncing a later season lands on the same rows.
 """
 
+import difflib
 import hashlib
 import re
 import unicodedata
@@ -164,6 +165,26 @@ def find_or_create_player(
                 if candidate.jersey_number == jersey:
                     match = candidate
                     break
+
+        # Fuzzy fallback: one source can simply misspell a name (e.g. the
+        # EuroCup feed's "Isaiah Mobley" vs. box-score-sourced "Isahiah
+        # Mobley" — a single-letter transposition/insertion), which fails
+        # both the exact-name and jersey match above and would otherwise
+        # mint a second, silently duplicate identity for the same person.
+        # A small roster (~20 players) makes near-identical names extremely
+        # unlikely to refer to two different people, so a high similarity
+        # ratio is safe here.
+        if match is None and len(normalized) >= 4:
+            best_ratio, best_candidate = 0.0, None
+            for candidate in existing:
+                candidate_normalized = normalize_person_name(candidate.name)
+                if len(candidate_normalized) < 4:
+                    continue
+                ratio = difflib.SequenceMatcher(None, normalized, candidate_normalized).ratio()
+                if ratio > best_ratio:
+                    best_ratio, best_candidate = ratio, candidate
+            if best_ratio >= 0.85:
+                match = best_candidate
 
         if match is not None:
             # Prefer a Latin name/enrichment over whatever's already stored
