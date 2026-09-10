@@ -109,7 +109,7 @@ export default function PlayerDetailPage() {
                     <Tooltip
                       contentStyle={{ background: "#18181b", border: "1px solid #27272a", borderRadius: 8, fontSize: 12 }}
                       labelStyle={{ color: "#fafafa" }}
-                      labelFormatter={(v: string) => new Date(v).toLocaleDateString()}
+                      labelFormatter={(v) => new Date(v as string).toLocaleDateString()}
                     />
                     <Line type="monotone" dataKey="rolling_ppg" name="Rolling PPG" stroke="#e2231a" strokeWidth={2} dot={false} />
                   </LineChart>
