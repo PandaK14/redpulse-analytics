@@ -85,7 +85,9 @@ def _rolling_form(game_log: list[dict], window: int = 5) -> list[dict]:
     return rolling
 
 
-def player_season_profile(db: Session, player_id: str) -> Optional[dict]:
+def player_season_profile(
+    db: Session, player_id: str, season: Optional[str] = None, team_id: Optional[str] = None
+) -> Optional[dict]:
     """Season averages, advanced metrics, full game log, and rolling form for
     one player. Backs both the roster table (summary fields only) and the
     player detail endpoint (everything)."""
@@ -93,7 +95,12 @@ def player_season_profile(db: Session, player_id: str) -> Optional[dict]:
     if player is None:
         return None
 
-    game_rows = db.query(PlayerGameStats).filter(PlayerGameStats.player_id == player_id).all()
+    game_query = db.query(PlayerGameStats).filter(PlayerGameStats.player_id == player_id)
+    if team_id:
+        game_query = game_query.filter(PlayerGameStats.team_id == team_id)
+    if season:
+        game_query = game_query.join(Game, Game.id == PlayerGameStats.game_id).filter(Game.season == season)
+    game_rows = game_query.all()
     if not game_rows:
         return None
 

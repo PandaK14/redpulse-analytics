@@ -33,23 +33,26 @@ def _zone_stats(shots: list[ShotEvent]) -> list[dict]:
     return result
 
 
-def team_shot_zones(db: Session, team_id: str, competition_id: Optional[str] = None) -> list[dict]:
-    query = db.query(ShotEvent).filter(ShotEvent.team_id == team_id)
+def team_shot_zones(
+    db: Session, team_id: str, competition_id: Optional[str] = None, season: Optional[str] = None
+) -> list[dict]:
+    query = db.query(ShotEvent).join(Game, Game.id == ShotEvent.game_id).filter(ShotEvent.team_id == team_id)
     if competition_id and competition_id != "ALL":
-        query = query.join(Game, Game.id == ShotEvent.game_id).filter(Game.competition_id == competition_id)
+        query = query.filter(Game.competition_id == competition_id)
+    if season:
+        query = query.filter(Game.season == season)
     return _zone_stats(query.all())
 
 
-def player_shot_zones(db: Session, player_id: str) -> list[dict]:
-    shots = db.query(ShotEvent).filter(ShotEvent.player_id == player_id).all()
-    return _zone_stats(shots)
+def player_shot_zones(db: Session, player_id: str, season: Optional[str] = None) -> list[dict]:
+    query = db.query(ShotEvent).join(Game, Game.id == ShotEvent.game_id).filter(ShotEvent.player_id == player_id)
+    if season:
+        query = query.filter(Game.season == season)
+    return _zone_stats(query.all())
 
 
-def competition_average_shot_zones(db: Session, competition_id: str) -> list[dict]:
-    shots = (
-        db.query(ShotEvent)
-        .join(Game, Game.id == ShotEvent.game_id)
-        .filter(Game.competition_id == competition_id)
-        .all()
-    )
-    return _zone_stats(shots)
+def competition_average_shot_zones(db: Session, competition_id: str, season: Optional[str] = None) -> list[dict]:
+    query = db.query(ShotEvent).join(Game, Game.id == ShotEvent.game_id).filter(Game.competition_id == competition_id)
+    if season:
+        query = query.filter(Game.season == season)
+    return _zone_stats(query.all())

@@ -9,6 +9,7 @@ from app.mock_data.generator import generate_mock_season
 from app.models import Game
 from app.scrapers.eurocup_scraper import EuroCupScraper
 from app.scrapers.winner_league_scraper import WinnerLeagueScraper
+from app.services.seasons import current_season, end_year_for_season, euroleague_code_for_season
 from app.services.team_overview import invalidate_league_average_cache
 
 # Process-local sync bookkeeping. Good enough for a single dev/API process;
@@ -19,7 +20,7 @@ _last_sync_status: str = "never_run"
 _last_sync_source: str = "none"
 
 
-def trigger_sync(db: Session) -> dict:
+def trigger_sync(db: Session, season: Optional[str] = None) -> dict:
     global _last_sync_at, _last_sync_status, _last_sync_source
     settings = get_settings()
 
@@ -28,7 +29,7 @@ def trigger_sync(db: Session) -> dict:
         source = "mock_data_generator"
         errors: list[str] = []
     else:
-        games_synced, errors = _sync_live_sources(db, settings)
+        games_synced, errors = _sync_live_sources(db, settings, season or current_season())
         source = "live_scrapers"
 
     if games_synced:
@@ -48,13 +49,13 @@ def trigger_sync(db: Session) -> dict:
     return {"status": _last_sync_status, "games_synced": games_synced, "source": source, "message": message}
 
 
-def _sync_live_sources(db: Session, settings) -> tuple[int, list[str]]:
+def _sync_live_sources(db: Session, settings, season: str) -> tuple[int, list[str]]:
     games_synced = 0
     errors = []
 
     try:
         winner_league_count = WinnerLeagueScraper().sync(
-            db, cyear=settings.winner_league_cyear, max_games=settings.scraper_max_games
+            db, cyear=end_year_for_season(season), max_games=settings.scraper_max_games
         )
         db.commit()
         games_synced += winner_league_count
@@ -64,7 +65,7 @@ def _sync_live_sources(db: Session, settings) -> tuple[int, list[str]]:
 
     try:
         eurocup_count = EuroCupScraper().sync(
-            db, season_code=settings.eurocup_season_code, max_games=settings.scraper_max_games
+            db, season_code=euroleague_code_for_season(season), max_games=settings.scraper_max_games
         )
         db.commit()
         games_synced += eurocup_count

@@ -19,7 +19,7 @@ const COLUMNS: { key: SortKey; label: string; format: (v: number) => string }[] 
   { key: "ast_to", label: "AST/TO", format: (v) => v.toFixed(2) },
 ];
 
-export function RosterTable({ roster }: { roster: RosterPlayer[] }) {
+export function RosterTable({ roster, season }: { roster: RosterPlayer[]; season: string }) {
   const router = useRouter();
   const [sortKey, setSortKey] = useState<SortKey>("ppg");
 
@@ -53,7 +53,7 @@ export function RosterTable({ roster }: { roster: RosterPlayer[] }) {
           {sorted.map((p) => (
             <tr
               key={p.player_id}
-              onClick={() => router.push(`/players/${encodeURIComponent(p.player_id)}`)}
+              onClick={() => router.push(`/players/${encodeURIComponent(p.player_id)}?season=${encodeURIComponent(season)}`)}
               className="cursor-pointer border-b border-border/60 last:border-0 hover:bg-white/[0.04]"
             >
               <td className="px-4 py-2.5 font-medium text-foreground">

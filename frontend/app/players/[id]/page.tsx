@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   LineChart,
@@ -28,6 +28,7 @@ function Kpi({ label, value }: { label: string; value: string }) {
 export default function PlayerDetailPage() {
   const params = useParams<{ id: string }>();
   const playerId = decodeURIComponent(params.id);
+  const season = useSearchParams().get("season") ?? undefined;
 
   const [profile, setProfile] = useState<PlayerProfile | null>(null);
   const [shots, setShots] = useState<ShotZoneStat[]>([]);
@@ -37,7 +38,7 @@ export default function PlayerDetailPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    Promise.all([getPlayerProfile(playerId), getPlayerShots(playerId)])
+    Promise.all([getPlayerProfile(playerId, season), getPlayerShots(playerId, season)])
       .then(([p, s]) => {
         if (cancelled) return;
         setProfile(p);
@@ -52,11 +53,11 @@ export default function PlayerDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [playerId]);
+  }, [playerId, season]);
 
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
-      <Link href="/" className="mb-4 inline-block text-sm text-muted hover:text-foreground">
+      <Link href={season ? `/?season=${encodeURIComponent(season)}` : "/"} className="mb-4 inline-block text-sm text-muted hover:text-foreground">
         ← Team Hub
       </Link>
 
@@ -79,6 +80,7 @@ export default function PlayerDetailPage() {
               <p className="text-sm text-muted">
                 {profile.position ?? "Position N/A"}
                 {profile.height_cm ? ` · ${profile.height_cm}cm` : ""} · {profile.games_played} games played
+                {season ? ` · ${season.slice(0, 4)}-${Number(season.slice(0, 4)) + 1} season` : ""}
               </p>
             </div>
 

@@ -96,7 +96,7 @@ class EuroCupScraper:
     def _team_id_for(self, code: str) -> str:
         return "HAPOEL_JLM" if code == HAPOEL_JERUSALEM_CLUB_CODE else code
 
-    def _ensure_pbp_player(self, db: Session, team_id: str, player_id: str, raw_name: Optional[str]) -> str:
+    def _ensure_pbp_player(self, db: Session, team_id: str, player_id: str, raw_name: Optional[str], season: str) -> str:
         """The box score's player list is expected to cover everyone, but the
         two feeds don't always agree — a player referenced in play-by-play
         who isn't already known would otherwise become a nameless foreign
@@ -115,9 +115,9 @@ class EuroCupScraper:
             name = f"{first.title()} {last.title()}".strip()
         else:
             name = player_id
-        return find_or_create_player(db, team_id, player_id, name).id
+        return find_or_create_player(db, team_id, player_id, name, season=season).id
 
-    def _resolve_starting_five(self, db: Session, box_score: Optional[dict], side: str, team_id: str) -> set:
+    def _resolve_starting_five(self, db: Session, box_score: Optional[dict], side: str, team_id: str, season: str) -> set:
         """Same resolution concern as _ensure_pbp_player: a starter's raw
         "EL_{code}" id may have been merged into a different existing row
         (e.g. a Hapoel Jerusalem player already created from a Winner League
@@ -132,7 +132,7 @@ class EuroCupScraper:
             raw_id = f"EL_{info['code']}"
             last, _, first = info["name"].partition(", ")
             name = f"{first.title()} {last.title()}".strip()
-            resolved.add(find_or_create_player(db, team_id, raw_id, name).id)
+            resolved.add(find_or_create_player(db, team_id, raw_id, name, season=season).id)
         return resolved
 
     def _sync_one_game(self, db: Session, g: dict, season_code: str, game_id: str) -> None:
@@ -187,6 +187,7 @@ class EuroCupScraper:
                 jersey=int(entry["player"].get("dorsal") or 0) or None,
                 position=entry["player"].get("positionName"),
                 height_cm=info.get("height"),
+                season=game.season,
             )
             db.add(
                 PlayerGameStats(
@@ -240,8 +241,8 @@ class EuroCupScraper:
         # tracked lineup must be seeded from the box score's startFive flag
         # or it stays wrong (missing players) until enough subs happen.
         lineup: dict[str, set] = {
-            home_team_id: self._resolve_starting_five(db, box_score, "local", home_team_id),
-            away_team_id: self._resolve_starting_five(db, box_score, "road", away_team_id),
+            home_team_id: self._resolve_starting_five(db, box_score, "local", home_team_id, game.season),
+            away_team_id: self._resolve_starting_five(db, box_score, "road", away_team_id, game.season),
         }
         last_made_shot: dict[str, ShotEvent] = {}
         last_made_shot_pbp: dict[str, PlayByPlayEvent] = {}
@@ -274,7 +275,7 @@ class EuroCupScraper:
                     player_key = _pbp_player_id(play.get("PLAYER_ID"))
                     if not player_key:
                         continue
-                    player_key = self._ensure_pbp_player(db, team_id, player_key, play.get("PLAYER"))
+                    player_key = self._ensure_pbp_player(db, team_id, player_key, play.get("PLAYER"), game.season)
                     if play_type == "IN":
                         lineup[team_id].add(player_key)
                     else:
@@ -286,7 +287,7 @@ class EuroCupScraper:
 
                 player_id = _pbp_player_id(play.get("PLAYER_ID"))
                 if player_id:
-                    player_id = self._ensure_pbp_player(db, team_id, player_id, play.get("PLAYER"))
+                    player_id = self._ensure_pbp_player(db, team_id, player_id, play.get("PLAYER"), game.season)
                 home_score = running_home_score
                 away_score = running_away_score
 

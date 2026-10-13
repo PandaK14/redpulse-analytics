@@ -248,7 +248,7 @@ class WinnerLeagueScraper:
         jersey_to_player_id: dict[int, str] = {}
         for r in rows:
             player = find_or_create_player(
-                db, team_id, f"WL_{team_id}_{stable_hash(r['name'])}", r["name"], jersey=r["jersey"]
+                db, team_id, f"WL_{team_id}_{stable_hash(r['name'])}", r["name"], jersey=r["jersey"], season=game.season
             )
             jersey_to_player_id[r["jersey"]] = player.id
 
@@ -313,7 +313,7 @@ class WinnerLeagueScraper:
             for p in side["players"]:
                 name = f"{p['firstName'].title()} {p['lastName'].title()}"
                 player = find_or_create_player(
-                    db, our_team_id, f"WL_{p['id']}", name, jersey=p.get("jerseyNumber")
+                    db, our_team_id, f"WL_{p['id']}", name, jersey=p.get("jerseyNumber"), season=game.season
                 )
                 player_id_map[int(p["id"])] = player.id
                 if p.get("jerseyNumber") in starter_jerseys_by_team[our_team_id]:

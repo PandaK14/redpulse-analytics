@@ -5,7 +5,7 @@ import { getTeamLineups, type LineupRow, type LineupSize } from "@/lib/api";
 
 const SIZE_OPTIONS: LineupSize[] = [5, 3, 2];
 
-export function LineupTable({ teamId }: { teamId: string }) {
+export function LineupTable({ teamId, season }: { teamId: string; season: string }) {
   const [size, setSize] = useState<LineupSize>(5);
   const [minMinutes, setMinMinutes] = useState(10);
   const [rows, setRows] = useState<LineupRow[]>([]);
@@ -14,7 +14,7 @@ export function LineupTable({ teamId }: { teamId: string }) {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    getTeamLineups(teamId, size, minMinutes)
+    getTeamLineups(teamId, size, minMinutes, season)
       .then((data) => {
         if (!cancelled) setRows(data);
       })
@@ -24,7 +24,7 @@ export function LineupTable({ teamId }: { teamId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [teamId, size, minMinutes]);
+  }, [teamId, size, minMinutes, season]);
 
   return (
     <div className="rounded-xl border border-border bg-card p-4">
@@ -60,7 +60,19 @@ export function LineupTable({ teamId }: { teamId: string }) {
       {loading ? (
         <p className="text-sm text-muted">Loading…</p>
       ) : rows.length === 0 ? (
-        <p className="text-sm text-muted">No lineups meet this minutes threshold.</p>
+        <p className="text-sm text-muted">
+          No lineups have played {minMinutes}+ minutes together yet
+          {minMinutes > 0 && (
+            <>
+              {" "}
+              &mdash;{" "}
+              <button onClick={() => setMinMinutes(0)} className="text-accent-glow underline underline-offset-2">
+                show all lineups
+              </button>
+            </>
+          )}
+          .
+        </p>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[560px] text-sm">

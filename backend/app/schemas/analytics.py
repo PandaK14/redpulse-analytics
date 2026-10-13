@@ -137,3 +137,10 @@ class ShotZoneStat(BaseModel):
 class ShotChartResponse(BaseModel):
     zones: list[ShotZoneStat]
     league_avg_zones: Optional[list[ShotZoneStat]] = None
+
+
+class SeasonInfo(BaseModel):
+    id: str
+    label: str
+    games: int
+    is_current: bool

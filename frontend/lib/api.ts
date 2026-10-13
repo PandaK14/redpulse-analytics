@@ -211,50 +211,68 @@ async function apiFetch<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export function getTeamOverview(teamId: string, competition: CompetitionFilter) {
-  return apiFetch<TeamOverview>(`/api/teams/${teamId}/overview?competition=${competition}`);
+export interface SeasonInfo {
+  id: string;
+  label: string;
+  games: number;
+  is_current: boolean;
 }
 
-export function getTeamRoster(teamId: string) {
-  return apiFetch<RosterPlayer[]>(`/api/teams/${teamId}/roster`);
+export function getSeasons() {
+  return apiFetch<SeasonInfo[]>("/api/seasons");
 }
 
-export function getTeamGames(teamId: string) {
-  return apiFetch<TeamGame[]>(`/api/teams/${teamId}/games`);
+function query(params: Record<string, string | number | undefined>): string {
+  const entries = Object.entries(params).filter(([, v]) => v !== undefined);
+  return entries.length ? `?${entries.map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join("&")}` : "";
 }
 
-export function getTeamSplits(teamId: string) {
-  return apiFetch<TeamSplits>(`/api/teams/${teamId}/splits`);
+export function getTeamOverview(teamId: string, competition: CompetitionFilter, season: string) {
+  return apiFetch<TeamOverview>(`/api/teams/${teamId}/overview${query({ competition, season })}`);
+}
+
+export function getTeamRoster(teamId: string, season: string) {
+  return apiFetch<RosterPlayer[]>(`/api/teams/${teamId}/roster${query({ season })}`);
+}
+
+export function getTeamGames(teamId: string, season: string) {
+  return apiFetch<TeamGame[]>(`/api/teams/${teamId}/games${query({ season })}`);
+}
+
+export function getTeamSplits(teamId: string, season: string) {
+  return apiFetch<TeamSplits>(`/api/teams/${teamId}/splits${query({ season })}`);
 }
 
 export type LineupSize = 5 | 3 | 2;
 
-export function getTeamLineups(teamId: string, size: LineupSize, minMinutes: number) {
-  return apiFetch<LineupRow[]>(`/api/teams/${teamId}/lineups?size=${size}&min_minutes=${minMinutes}`);
+export function getTeamLineups(teamId: string, size: LineupSize, minMinutes: number, season: string) {
+  return apiFetch<LineupRow[]>(
+    `/api/teams/${teamId}/lineups${query({ size, min_minutes: minMinutes, season })}`
+  );
 }
 
-export function getTeamOnOff(teamId: string) {
-  return apiFetch<OnOffRow[]>(`/api/teams/${teamId}/onoff`);
+export function getTeamOnOff(teamId: string, season: string) {
+  return apiFetch<OnOffRow[]>(`/api/teams/${teamId}/onoff${query({ season })}`);
 }
 
-export function getTeamShots(teamId: string, competition: CompetitionFilter) {
-  return apiFetch<ShotChartResponse>(`/api/teams/${teamId}/shots?competition=${competition}`);
+export function getTeamShots(teamId: string, competition: CompetitionFilter, season: string) {
+  return apiFetch<ShotChartResponse>(`/api/teams/${teamId}/shots${query({ competition, season })}`);
 }
 
-export function getPlayerProfile(playerId: string) {
-  return apiFetch<PlayerProfile>(`/api/players/${playerId}`);
+export function getPlayerProfile(playerId: string, season?: string) {
+  return apiFetch<PlayerProfile>(`/api/players/${playerId}${query({ season })}`);
 }
 
-export function getPlayerShots(playerId: string) {
-  return apiFetch<ShotZoneStat[]>(`/api/players/${playerId}/shots`);
+export function getPlayerShots(playerId: string, season?: string) {
+  return apiFetch<ShotZoneStat[]>(`/api/players/${playerId}/shots${query({ season })}`);
 }
 
 export function getSyncStatus() {
   return apiFetch<SyncStatus>("/api/sync/status");
 }
 
-export async function triggerSync(): Promise<SyncTriggerResult> {
-  const res = await fetch(`${API_BASE_URL}/api/sync/trigger`, { method: "POST" });
+export async function triggerSync(season?: string): Promise<SyncTriggerResult> {
+  const res = await fetch(`${API_BASE_URL}/api/sync/trigger${query({ season })}`, { method: "POST" });
   if (!res.ok) {
     throw new Error(`Sync failed: ${res.status}`);
   }

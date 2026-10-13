@@ -13,6 +13,7 @@ import { OnOffTable } from "@/components/team/OnOffTable";
 import { ShotChart } from "@/components/visual/ShotChart";
 import {
   HAPOEL_JERUSALEM_TEAM_ID,
+  getSeasons,
   getSyncStatus,
   getTeamGames,
   getTeamOnOff,
@@ -24,6 +25,7 @@ import {
   type CompetitionFilter,
   type OnOffRow,
   type RosterPlayer,
+  type SeasonInfo,
   type ShotChartResponse,
   type SyncStatus,
   type TeamGame,
@@ -40,8 +42,14 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "roster", label: "Roster" },
 ];
 
+// The complete season is the better first impression while the current one
+// is only a few rounds in; the picker's "Current" badge marks the live one.
+const DEFAULT_SEASON = "2025-26";
+
 export default function TeamHubPage() {
   const [tab, setTab] = useState<TabId>("overview");
+  const [seasons, setSeasons] = useState<SeasonInfo[]>([]);
+  const [season, setSeason] = useState<string | null>(null);
   const [competition, setCompetition] = useState<CompetitionFilter>("ALL");
   const [overview, setOverview] = useState<TeamOverview | null>(null);
   const [splits, setSplits] = useState<TeamSplits | null>(null);
@@ -49,6 +57,7 @@ export default function TeamHubPage() {
   const [games, setGames] = useState<TeamGame[]>([]);
   const [onOff, setOnOff] = useState<OnOffRow[]>([]);
   const [shots, setShots] = useState<ShotChartResponse | null>(null);
+  const [shotCompetition, setShotCompetition] = useState<CompetitionFilter>("WINNER_LEAGUE");
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -60,20 +69,24 @@ export default function TeamHubPage() {
   // (successful) state with a stale error or stale data.
   const requestIdRef = useRef(0);
 
-  const loadData = useCallback(async (comp: CompetitionFilter) => {
+  const loadData = useCallback(async (comp: CompetitionFilter, seasonId: string) => {
     const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
-      const [overviewData, splitsData, rosterData, gamesData, onOffData, shotsData, status] = await Promise.all([
-        getTeamOverview(HAPOEL_JERUSALEM_TEAM_ID, comp),
-        getTeamSplits(HAPOEL_JERUSALEM_TEAM_ID),
-        getTeamRoster(HAPOEL_JERUSALEM_TEAM_ID),
-        getTeamGames(HAPOEL_JERUSALEM_TEAM_ID),
-        getTeamOnOff(HAPOEL_JERUSALEM_TEAM_ID),
-        getTeamShots(HAPOEL_JERUSALEM_TEAM_ID, comp === "ALL" ? "WINNER_LEAGUE" : comp),
+      const [overviewData, splitsData, rosterData, gamesData, onOffData, status] = await Promise.all([
+        getTeamOverview(HAPOEL_JERUSALEM_TEAM_ID, comp, seasonId),
+        getTeamSplits(HAPOEL_JERUSALEM_TEAM_ID, seasonId),
+        getTeamRoster(HAPOEL_JERUSALEM_TEAM_ID, seasonId),
+        getTeamGames(HAPOEL_JERUSALEM_TEAM_ID, seasonId),
+        getTeamOnOff(HAPOEL_JERUSALEM_TEAM_ID, seasonId),
         getSyncStatus(),
       ]);
+      // "All" shows one competition's zones (league averages only exist per
+      // competition): the Winner League, unless it has no games this season.
+      const shotCompetition =
+        comp !== "ALL" ? comp : splitsData.winner_league.games_played ? "WINNER_LEAGUE" : "EUROCUP";
+      const shotsData = await getTeamShots(HAPOEL_JERUSALEM_TEAM_ID, shotCompetition, seasonId);
       if (requestIdRef.current !== requestId) return;
       setOverview(overviewData);
       setSplits(splitsData);
@@ -81,6 +94,7 @@ export default function TeamHubPage() {
       setGames(comp === "ALL" ? gamesData : gamesData.filter((g) => g.competition_id === comp));
       setOnOff(onOffData);
       setShots(shotsData);
+      setShotCompetition(shotCompetition);
       setSyncStatus(status);
     } catch (err) {
       if (requestIdRef.current !== requestId) return;
@@ -95,14 +109,41 @@ export default function TeamHubPage() {
   }, []);
 
   useEffect(() => {
-    loadData(competition);
-  }, [competition, loadData]);
+    getSeasons()
+      .then((list) => {
+        setSeasons(list);
+        const fromUrl = new URLSearchParams(window.location.search).get("season");
+        const initial =
+          list.find((s) => s.id === fromUrl) ?? list.find((s) => s.id === DEFAULT_SEASON) ?? list[0];
+        setSeason(initial?.id ?? null);
+        if (!initial) setLoading(false);
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "Failed to load seasons");
+        setLoading(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (season) loadData(competition, season);
+  }, [competition, season, loadData]);
+
+  const handleSeasonChange = (next: string) => {
+    if (next === season) return;
+    setOverview(null);
+    setSeason(next);
+    const url = new URL(window.location.href);
+    url.searchParams.set("season", next);
+    window.history.replaceState(null, "", url);
+  };
 
   const handleSync = async () => {
+    if (!season) return;
     setSyncing(true);
     try {
-      await triggerSync();
-      await loadData(competition);
+      await triggerSync(season);
+      setSeasons(await getSeasons());
+      await loadData(competition, season);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sync failed");
     } finally {
@@ -118,12 +159,15 @@ export default function TeamHubPage() {
         onSync={handleSync}
         syncing={syncing}
         syncStatus={syncStatus}
+        seasons={seasons}
+        season={season}
+        onSeasonChange={handleSeasonChange}
       />
 
       <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">
         <h1 className="mb-1 text-xl font-semibold text-foreground">Team Hub</h1>
         <p className="mb-6 text-sm text-muted">
-          Hapoel Jerusalem season overview across {competition === "ALL" ? "all competitions" : competition === "WINNER_LEAGUE" ? "the Winner League" : "the EuroCup"}.
+          Hapoel Jerusalem {seasons.find((s) => s.id === season)?.label} season overview across {competition === "ALL" ? "all competitions" : competition === "WINNER_LEAGUE" ? "the Winner League" : "the EuroCup"}.
         </p>
 
         {error && (
@@ -155,31 +199,39 @@ export default function TeamHubPage() {
 
               {tab === "overview" && (
                 <div className="flex flex-col gap-6">
-                  <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-                    <div className="lg:col-span-2">
-                      <FourFactorsCard overview={overview} />
+                  {(overview.four_factors || games.length > 0) && (
+                    <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+                      {overview.four_factors && (
+                        <div className="lg:col-span-2">
+                          <FourFactorsCard overview={overview} />
+                        </div>
+                      )}
+                      {games.length > 0 && <GamesList games={games} />}
                     </div>
-                    <GamesList games={games} />
-                  </div>
+                  )}
                   {splits && <SplitMatrix splits={splits} />}
                 </div>
               )}
 
               {tab === "lineups" && (
                 <div className="flex flex-col gap-6">
-                  <LineupTable teamId={HAPOEL_JERUSALEM_TEAM_ID} />
+                  <LineupTable teamId={HAPOEL_JERUSALEM_TEAM_ID} season={season!} />
                   <OnOffTable rows={onOff} />
                 </div>
               )}
 
               {tab === "shots" && shots && (
-                <ShotChart zones={shots.zones} leagueZones={shots.league_avg_zones} />
+                <ShotChart
+                  zones={shots.zones}
+                  leagueZones={shots.league_avg_zones}
+                  title={`Shot Chart · ${shotCompetition === "EUROCUP" ? "EuroCup" : "Winner League"}`}
+                />
               )}
 
               {tab === "roster" && (
                 <div>
                   <p className="mb-3 text-sm font-semibold text-foreground">Player Performance Hub</p>
-                  <RosterTable roster={roster} />
+                  <RosterTable roster={roster} season={season!} />
                 </div>
               )}
             </div>

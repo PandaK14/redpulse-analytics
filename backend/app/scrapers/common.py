@@ -15,7 +15,7 @@ from typing import Optional
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from app.models import Competition, PlayByPlayEvent, Player, ShotEvent, Team
+from app.models import Competition, Game, PlayByPlayEvent, Player, PlayerGameStats, ShotEvent, Team
 
 
 def discard_pbp_if_score_mismatch(
@@ -124,6 +124,24 @@ def find_or_create_team(
     return team
 
 
+FUZZY_MATCH_IN_SEASON = 0.85
+FUZZY_MATCH_ANY_SEASON = 0.92
+
+
+def _players_seen_in_season(db: Session, team_id: str, season: str) -> set:
+    # Autoflush is off, so flush first or this game's own just-added box score
+    # rows (which a later play-by-play lookup depends on) would be invisible.
+    db.flush()
+    rows = (
+        db.query(PlayerGameStats.player_id)
+        .join(Game, Game.id == PlayerGameStats.game_id)
+        .filter(PlayerGameStats.team_id == team_id, Game.season == season)
+        .distinct()
+        .all()
+    )
+    return {player_id for (player_id,) in rows}
+
+
 def find_or_create_player(
     db: Session,
     team_id: str,
@@ -132,18 +150,27 @@ def find_or_create_player(
     jersey: Optional[int] = None,
     position: Optional[str] = None,
     height_cm: Optional[int] = None,
+    season: Optional[str] = None,
 ) -> Player:
     """Upserts a player by external_id. For Hapoel Jerusalem specifically,
     also tries to match an existing row from a *different* source/script for
     the same human — e.g. a Hebrew box-score-only "WL_" row, a segevstats
     "WL_" row with a Latin name, and an "EL_" EuroCup row would otherwise all
-    become separate players for e.g. Jared Harper."""
+    become separate players for e.g. Jared Harper.
+
+    A returning player keeps one row across seasons (matched by Latin name),
+    but jersey numbers are reused year to year, so a jersey match — and the
+    looser fuzzy name match — only count against players already seen this
+    season; otherwise a new #1 would be merged into last season's #1."""
     player = db.get(Player, external_id)
     if player is not None:
+        if season and jersey and player.jersey_number != jersey:
+            player.jersey_number = jersey
         return player
 
     if team_id == "HAPOEL_JLM":
         existing = db.query(Player).filter(Player.team_id == team_id).all()
+        in_season = _players_seen_in_season(db, team_id, season) if season else {p.id for p in existing}
         match = None
 
         # Latin-script name match (segevstats WL_ <-> EuroCup EL_). A Hebrew
@@ -162,7 +189,7 @@ def find_or_create_player(
         # (unlike e.g. a merged franchise on another team).
         if match is None and jersey is not None:
             for candidate in existing:
-                if candidate.jersey_number == jersey:
+                if candidate.id in in_season and candidate.jersey_number == jersey:
                     match = candidate
                     break
 
@@ -172,8 +199,8 @@ def find_or_create_player(
         # both the exact-name and jersey match above and would otherwise
         # mint a second, silently duplicate identity for the same person.
         # A small roster (~20 players) makes near-identical names extremely
-        # unlikely to refer to two different people, so a high similarity
-        # ratio is safe here.
+        # unlikely to refer to two different people; a player not yet seen
+        # this season needs a closer match than one who has been.
         if match is None and len(normalized) >= 4:
             best_ratio, best_candidate = 0.0, None
             for candidate in existing:
@@ -181,10 +208,10 @@ def find_or_create_player(
                 if len(candidate_normalized) < 4:
                     continue
                 ratio = difflib.SequenceMatcher(None, normalized, candidate_normalized).ratio()
-                if ratio > best_ratio:
+                threshold = FUZZY_MATCH_IN_SEASON if candidate.id in in_season else FUZZY_MATCH_ANY_SEASON
+                if ratio >= threshold and ratio > best_ratio:
                     best_ratio, best_candidate = ratio, candidate
-            if best_ratio >= 0.85:
-                match = best_candidate
+            match = best_candidate
 
         if match is not None:
             # Prefer a Latin name/enrichment over whatever's already stored
@@ -196,6 +223,8 @@ def find_or_create_player(
                 match.position = position
             if height_cm and not match.height_cm:
                 match.height_cm = height_cm
+            if season and jersey and match.jersey_number != jersey:
+                match.jersey_number = jersey
             return match
 
     player = Player(

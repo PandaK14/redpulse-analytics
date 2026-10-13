@@ -1,7 +1,8 @@
 "use client";
 
-import { CircleDot, RefreshCw } from "lucide-react";
-import type { CompetitionFilter, SyncStatus } from "@/lib/api";
+import { Check, ChevronDown, CircleDot, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import type { CompetitionFilter, SeasonInfo, SyncStatus } from "@/lib/api";
 
 interface TopBarProps {
   competition: CompetitionFilter;
@@ -9,6 +10,9 @@ interface TopBarProps {
   onSync: () => void;
   syncing: boolean;
   syncStatus: SyncStatus | null;
+  seasons: SeasonInfo[];
+  season: string | null;
+  onSeasonChange: (value: string) => void;
 }
 
 const COMPETITION_OPTIONS: { value: CompetitionFilter; label: string }[] = [
@@ -17,7 +21,90 @@ const COMPETITION_OPTIONS: { value: CompetitionFilter; label: string }[] = [
   { value: "EUROCUP", label: "EuroCup" },
 ];
 
-export function TopBar({ competition, onCompetitionChange, onSync, syncing, syncStatus }: TopBarProps) {
+function SeasonPicker({
+  seasons,
+  season,
+  onChange,
+}: {
+  seasons: SeasonInfo[];
+  season: string | null;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const selected = seasons.find((s) => s.id === season);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent) {
+        if (e.key === "Escape") setOpen(false);
+      } else if (!rootRef.current?.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, [open]);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={seasons.length === 0}
+        className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-xs text-foreground transition-colors hover:border-muted disabled:text-muted"
+      >
+        {selected?.label ?? "Season"}
+        <ChevronDown className={`h-3.5 w-3.5 text-muted transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <ul
+          role="listbox"
+          className="absolute right-0 z-20 mt-1.5 min-w-[11rem] overflow-hidden rounded-lg border border-border bg-card py-1 shadow-xl"
+        >
+          {seasons.map((s) => (
+            <li key={s.id} role="option" aria-selected={s.id === season}>
+              <button
+                onClick={() => {
+                  setOpen(false);
+                  onChange(s.id);
+                }}
+                className="flex w-full items-center justify-between gap-4 px-3 py-2 text-left text-xs text-foreground hover:bg-white/[0.04]"
+              >
+                <span className="flex items-center gap-2">
+                  {s.label}
+                  {s.is_current && (
+                    <span className="rounded bg-accent/20 px-1.5 py-0.5 text-[10px] font-medium text-accent-glow">
+                      Current
+                    </span>
+                  )}
+                </span>
+                {s.id === season && <Check className="h-3.5 w-3.5 text-accent-glow" />}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+export function TopBar({
+  competition,
+  onCompetitionChange,
+  onSync,
+  syncing,
+  syncStatus,
+  seasons,
+  season,
+  onSeasonChange,
+}: TopBarProps) {
   return (
     <header className="sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur">
       <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-4">
@@ -48,9 +135,7 @@ export function TopBar({ competition, onCompetitionChange, onSync, syncing, sync
             ))}
           </div>
 
-          <span className="rounded-md border border-border bg-card px-3 py-1.5 text-xs text-muted">
-            2025-2026
-          </span>
+          <SeasonPicker seasons={seasons} season={season} onChange={onSeasonChange} />
 
           <button
             onClick={onSync}

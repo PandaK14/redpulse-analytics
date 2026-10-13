@@ -11,8 +11,6 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./redpulse.db"
     use_mock_data: bool = False
     current_season: str = "2025-2026"
-    winner_league_cyear: int = 2026
-    eurocup_season_code: str = "U2025"
     scraper_max_games: Optional[int] = None
 
 

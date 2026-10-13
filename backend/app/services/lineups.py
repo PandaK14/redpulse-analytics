@@ -18,6 +18,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.models import Game, PlayByPlayEvent, Player
+from app.services.rosters import team_player_ids
 from app.services.advanced_stats import defensive_rating, estimated_possessions, net_rating, offensive_rating
 
 PERIOD_SECONDS = 600  # FIBA quarter
@@ -122,13 +123,16 @@ def _reconstruct_game_stints(
     return [s for s in stints if len(s["lineup"]) == 5]
 
 
-def team_lineup_stints(db: Session, team_id: str) -> list[dict]:
+def team_lineup_stints(db: Session, team_id: str, season: Optional[str] = None) -> list[dict]:
     """All 5-man stints (across every game with play-by-play) for a team."""
-    games = db.query(Game).filter(
+    game_query = db.query(Game).filter(
         (Game.home_team_id == team_id) | (Game.away_team_id == team_id),
         Game.raw_pbp_available.is_(True),
-    ).all()
-    valid_player_ids = {p.id for p in db.query(Player.id).filter(Player.team_id == team_id).all()}
+    )
+    if season:
+        game_query = game_query.filter(Game.season == season)
+    games = game_query.all()
+    valid_player_ids = team_player_ids(db, team_id, season)
 
     all_stints = []
     for game in games:
@@ -182,10 +186,12 @@ def _bucket_ratings(bucket: dict) -> dict:
     return {"ortg": round(ortg, 1), "drtg": round(drtg, 1), "net_rating": round(net_rating(ortg, drtg), 1)}
 
 
-def lineup_table(db: Session, team_id: str, size: int = 5, min_minutes: float = 0.0) -> list[dict]:
+def lineup_table(
+    db: Session, team_id: str, size: int = 5, min_minutes: float = 0.0, season: Optional[str] = None
+) -> list[dict]:
     """5-man lineups by default; pass size=3 or size=2 for the sub-combination
     tables (every 5-man stint counts toward each of its N-man subsets)."""
-    stints = team_lineup_stints(db, team_id)
+    stints = team_lineup_stints(db, team_id, season)
     if size not in (5, 4, 3, 2, 1):
         raise ValueError("size must be between 1 and 5")
 
@@ -196,7 +202,7 @@ def lineup_table(db: Session, team_id: str, size: int = 5, min_minutes: float = 
                 expanded.append({**s, "lineup": combo})
         stints = expanded
 
-    players = {p.id: p.name for p in db.query(Player).filter(Player.team_id == team_id).all()}
+    players = {p.id: p.name for p in db.query(Player).filter(Player.id.in_(team_player_ids(db, team_id, season))).all()}
     buckets: dict[tuple, dict] = {}
     for s in stints:
         bucket = buckets.setdefault(s["lineup"], _empty_bucket())
@@ -220,9 +226,9 @@ def lineup_table(db: Session, team_id: str, size: int = 5, min_minutes: float = 
     return rows
 
 
-def on_off_table(db: Session, team_id: str) -> list[dict]:
-    stints = team_lineup_stints(db, team_id)
-    roster = db.query(Player).filter(Player.team_id == team_id).all()
+def on_off_table(db: Session, team_id: str, season: Optional[str] = None) -> list[dict]:
+    stints = team_lineup_stints(db, team_id, season)
+    roster = db.query(Player).filter(Player.id.in_(team_player_ids(db, team_id, season))).all()
 
     rows = []
     for player in roster:
@@ -230,7 +236,9 @@ def on_off_table(db: Session, team_id: str) -> list[dict]:
         for s in stints:
             _accumulate(on if player.id in s["lineup"] else off, s)
 
-        if on["minutes"] == 0 and off["minutes"] == 0:
+        # Never on the floor in this season's tracked stints (a bench-warmer,
+        # or someone who only joined in another season): nothing to compare.
+        if on["minutes"] == 0:
             continue
 
         net_on = _bucket_ratings(on)["net_rating"] if on["minutes"] else None

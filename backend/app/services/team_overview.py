@@ -19,15 +19,20 @@ from app.services.advanced_stats import (
     sum_stats,
 )
 from app.services.four_factors import four_factors
+from app.services.rosters import team_player_ids
 
 
-def team_game_rows(db: Session, team_id: str, competition_id: Optional[str] = None) -> list[dict]:
+def team_game_rows(
+    db: Session, team_id: str, competition_id: Optional[str] = None, season: Optional[str] = None
+) -> list[dict]:
     query = db.query(Game).filter(
         ((Game.home_team_id == team_id) | (Game.away_team_id == team_id)),
         Game.is_synced.is_(True),
     )
     if competition_id and competition_id != "ALL":
         query = query.filter(Game.competition_id == competition_id)
+    if season:
+        query = query.filter(Game.season == season)
 
     rows = []
     for game in query.all():
@@ -42,8 +47,10 @@ def team_game_rows(db: Session, team_id: str, competition_id: Optional[str] = No
     return rows
 
 
-def team_overview(db: Session, team_id: str, competition_id: Optional[str] = None) -> dict:
-    rows = team_game_rows(db, team_id, competition_id)
+def team_overview(
+    db: Session, team_id: str, competition_id: Optional[str] = None, season: Optional[str] = None
+) -> dict:
+    rows = team_game_rows(db, team_id, competition_id, season)
     games_played = len(rows)
     if games_played == 0:
         return {"games_played": 0}
@@ -81,40 +88,41 @@ def team_overview(db: Session, team_id: str, competition_id: Optional[str] = Non
 # team in the competition) and multiple endpoints on the same page load ask
 # for the same competition's average — cache it in-process rather than
 # recompute it several times per request and hold a DB connection each time.
-_league_avg_cache: dict[str, dict] = {}
+_league_avg_cache: dict[tuple, dict] = {}
 
 
 def invalidate_league_average_cache() -> None:
     _league_avg_cache.clear()
 
 
-def competition_average_four_factors(db: Session, competition_id: str) -> dict:
-    if competition_id in _league_avg_cache:
-        return _league_avg_cache[competition_id]
+def competition_average_four_factors(db: Session, competition_id: str, season: Optional[str] = None) -> dict:
+    cache_key = (competition_id, season)
+    if cache_key in _league_avg_cache:
+        return _league_avg_cache[cache_key]
 
     team_ids = [t.id for t in db.query(Team).filter(Team.competition_id == competition_id).all()]
     factor_sums = {"efg_pct": 0.0, "tov_pct": 0.0, "orb_pct": 0.0, "ftr": 0.0}
     counted = 0
     for team_id in team_ids:
-        overview = team_overview(db, team_id, competition_id)
+        overview = team_overview(db, team_id, competition_id, season)
         if overview.get("games_played"):
             counted += 1
             for k in factor_sums:
                 factor_sums[k] += overview["four_factors"][k]
     result = factor_sums if not counted else {k: round(v / counted, 4) for k, v in factor_sums.items()}
-    _league_avg_cache[competition_id] = result
+    _league_avg_cache[cache_key] = result
     return result
 
 
-def team_roster_with_averages(db: Session, team_id: str) -> list[dict]:
+def team_roster_with_averages(db: Session, team_id: str, season: Optional[str] = None) -> list[dict]:
     summary_fields = [
         "player_id", "name", "position", "jersey_number",
         "games_played", "mpg", "ppg", "rpg", "apg", "ts_pct", "usg_pct", "ast_to",
     ]
-    players = db.query(Player).filter(Player.team_id == team_id).all()
+    players = db.query(Player).filter(Player.id.in_(team_player_ids(db, team_id, season))).all()
     result = []
     for player in players:
-        profile = player_season_profile(db, player.id)
+        profile = player_season_profile(db, player.id, season, team_id)
         if profile is None:
             continue
         result.append({k: profile[k] for k in summary_fields})
@@ -122,8 +130,8 @@ def team_roster_with_averages(db: Session, team_id: str) -> list[dict]:
     return result
 
 
-def team_games(db: Session, team_id: str) -> list[dict]:
-    rows = team_game_rows(db, team_id)
+def team_games(db: Session, team_id: str, season: Optional[str] = None) -> list[dict]:
+    rows = team_game_rows(db, team_id, season=season)
     opponents = {t.id: t for t in db.query(Team).all()}
     games = []
     for r in rows:
