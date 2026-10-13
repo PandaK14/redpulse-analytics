@@ -154,8 +154,57 @@ export interface SyncTriggerResult {
   message: string;
 }
 
+// The hosted API runs on a free tier that sleeps when idle and takes up to a
+// minute to wake. While it does, requests fail at the network level or return
+// 502/503/504, so retry quietly instead of surfacing an error.
+const WAKE_TIMEOUT_MS = 90_000;
+const WAKE_RETRY_DELAY_MS = 3_000;
+const RETRY_ENABLED = !API_BASE_URL.includes("localhost");
+
+let pendingWakeRetries = 0;
+const wakeListeners = new Set<() => void>();
+
+function adjustWakeRetries(delta: number) {
+  pendingWakeRetries += delta;
+  wakeListeners.forEach((listener) => listener());
+}
+
+export function subscribeBackendWaking(listener: () => void) {
+  wakeListeners.add(listener);
+  return () => {
+    wakeListeners.delete(listener);
+  };
+}
+
+export function isBackendWaking() {
+  return pendingWakeRetries > 0;
+}
+
+async function fetchWithWakeRetry(url: string, init: RequestInit): Promise<Response> {
+  const startedAt = Date.now();
+  let signaled = false;
+  try {
+    for (;;) {
+      const timedOut = Date.now() - startedAt > WAKE_TIMEOUT_MS;
+      try {
+        const res = await fetch(url, init);
+        if (!RETRY_ENABLED || timedOut || ![502, 503, 504].includes(res.status)) return res;
+      } catch (err) {
+        if (!RETRY_ENABLED || timedOut) throw err;
+      }
+      if (!signaled) {
+        signaled = true;
+        adjustWakeRetries(1);
+      }
+      await new Promise((resolve) => setTimeout(resolve, WAKE_RETRY_DELAY_MS));
+    }
+  } finally {
+    if (signaled) adjustWakeRetries(-1);
+  }
+}
+
 async function apiFetch<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, { cache: "no-store" });
+  const res = await fetchWithWakeRetry(`${API_BASE_URL}${path}`, { cache: "no-store" });
   if (!res.ok) {
     throw new Error(`API error ${res.status}: ${path}`);
   }

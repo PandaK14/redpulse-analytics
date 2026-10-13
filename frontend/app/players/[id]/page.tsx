@@ -12,6 +12,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import { LoadingNotice } from "@/components/layout/LoadingNotice";
 import { ShotChart } from "@/components/visual/ShotChart";
 import { getPlayerProfile, getPlayerShots, type PlayerProfile, type ShotZoneStat } from "@/lib/api";
 
@@ -66,7 +67,7 @@ export default function PlayerDetailPage() {
       )}
 
       {loading && !profile ? (
-        <p className="text-sm text-muted">Loading…</p>
+        <LoadingNotice />
       ) : (
         profile && (
           <div className="flex flex-col gap-6">

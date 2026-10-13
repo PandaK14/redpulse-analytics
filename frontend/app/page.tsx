@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { TopBar } from "@/components/layout/TopBar";
+import { LoadingNotice } from "@/components/layout/LoadingNotice";
 import { KpiStrip } from "@/components/team/KpiStrip";
 import { FourFactorsCard } from "@/components/team/FourFactorsCard";
 import { RosterTable } from "@/components/team/RosterTable";
@@ -132,7 +133,7 @@ export default function TeamHubPage() {
         )}
 
         {loading && !overview ? (
-          <p className="text-sm text-muted">Loading…</p>
+          <LoadingNotice />
         ) : (
           overview && (
             <div className="flex flex-col gap-6">
